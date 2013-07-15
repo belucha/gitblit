@@ -282,13 +282,6 @@ public class EditRepositoryPage extends RootSubPage {
 					}
 					
 					if (user.canCreate() && !user.canAdmin() && allowEditName) {
-						// ensure repository name begins with the user's path
-						if (!repositoryModel.name.startsWith(user.getPersonalPath())) {
-							error(MessageFormat.format(getString("gb.illegalPersonalRepositoryLocation"),
-									user.getPersonalPath()));
-							return;
-						}
-						
 						if (repositoryModel.name.equals(user.getPersonalPath())) {
 							// reset path prefix and show error
 							repositoryModel.name = user.getPersonalPath() + "/";

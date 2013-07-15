@@ -181,7 +181,7 @@ public class RepositoryModel implements Serializable, Comparable<RepositoryModel
 	}
 	
 	public boolean isUsersPersonalRepository(String username) {
-		return !StringUtils.isEmpty(projectPath) && projectPath.equalsIgnoreCase("~" + username);
+		return !StringUtils.isEmpty(projectPath) && isOwner(username);
 	}
 	
 	public boolean allowAnonymousView() {
