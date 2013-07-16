@@ -528,7 +528,7 @@ public class GitBlit implements ServletContextListener {
 		if (settings.getBoolean(Keys.git.enableGitServlet, true)) {
 			AccessPermission permission = user.getRepositoryPermission(repository).permission;
 			if (permission.exceeds(AccessPermission.NONE)) {
-				list.add(new RepositoryUrl(getRepositoryUrl(request, username, repository), permission));
+				list.add(new RepositoryUrl(getRepositoryUrl(request, "", repository), permission));
 			}
 		}
 

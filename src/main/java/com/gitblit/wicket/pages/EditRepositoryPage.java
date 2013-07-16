@@ -149,7 +149,7 @@ public class EditRepositoryPage extends RootSubPage {
 			if (user.canAdmin()) {
 				super.setupPage(getString("gb.newRepository"), "");
 			} else {
-				super.setupPage(getString("gb.newRepository"), user.getDisplayName());
+				super.setupPage(getString("gb.newRepository"), "");
 			}
 		} else {
 			super.setupPage(getString("gb.edit"), repositoryModel.name);
