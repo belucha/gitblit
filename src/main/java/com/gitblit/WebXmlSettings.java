@@ -31,9 +31,9 @@ import com.gitblit.utils.StringUtils;
 
 /**
  * Loads Gitblit settings from the context-parameter values of a web.xml file.
- * 
+ *
  * @author James Moger
- * 
+ *
  */
 public class WebXmlSettings extends IStoredSettings {
 
@@ -54,7 +54,7 @@ public class WebXmlSettings extends IStoredSettings {
 
 	public void applyOverrides(File overrideFile) {
 		this.overrideFile = overrideFile;
-		
+
 		// apply any web-configured overrides
 		if (overrideFile.exists()) {
 			try {
@@ -77,6 +77,36 @@ public class WebXmlSettings extends IStoredSettings {
 	@Override
 	protected Properties read() {
 		return properties;
+	}
+
+	@Override
+	public synchronized boolean saveSettings() {
+		try {
+			Properties props = new Properties();
+			// load pre-existing web-configuration
+			if (overrideFile.exists()) {
+				InputStream is = new FileInputStream(overrideFile);
+				props.load(is);
+				is.close();
+			}
+
+			// put all new settings and persist
+			for (String key : removals) {
+				props.remove(key);
+			}
+			removals.clear();
+			OutputStream os = new FileOutputStream(overrideFile);
+			props.store(os, null);
+			os.close();
+
+			// override current runtime settings
+			properties.clear();
+			properties.putAll(props);
+			return true;
+		} catch (Throwable t) {
+			logger.error("Failed to save settings!", t);
+		}
+		return false;
 	}
 
 	@Override

@@ -15,15 +15,16 @@
  */
 package com.gitblit.wicket.pages;
 
-import java.awt.Color;
-import java.awt.Dimension;
 import java.text.MessageFormat;
 import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 
 import org.apache.wicket.Component;
 import org.apache.wicket.PageParameters;
+import org.apache.wicket.behavior.HeaderContributor;
 import org.apache.wicket.markup.html.basic.Label;
 import org.apache.wicket.markup.html.link.BookmarkablePageLink;
 import org.apache.wicket.markup.html.panel.Fragment;
@@ -32,43 +33,40 @@ import org.apache.wicket.markup.repeater.data.DataView;
 import org.apache.wicket.markup.repeater.data.ListDataProvider;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
-import org.wicketstuff.googlecharts.ChartAxis;
-import org.wicketstuff.googlecharts.ChartAxisType;
-import org.wicketstuff.googlecharts.ChartProvider;
-import org.wicketstuff.googlecharts.ChartType;
-import org.wicketstuff.googlecharts.IChartData;
-import org.wicketstuff.googlecharts.LineStyle;
-import org.wicketstuff.googlecharts.MarkerType;
-import org.wicketstuff.googlecharts.ShapeMarker;
 
-import com.gitblit.GitBlit;
 import com.gitblit.Keys;
 import com.gitblit.models.Metric;
-import com.gitblit.models.PathModel;
 import com.gitblit.models.RepositoryModel;
 import com.gitblit.models.UserModel;
 import com.gitblit.utils.JGitUtils;
-import com.gitblit.utils.MarkdownUtils;
 import com.gitblit.utils.StringUtils;
+import com.gitblit.wicket.CacheControl;
+import com.gitblit.wicket.CacheControl.LastModified;
 import com.gitblit.wicket.GitBlitWebSession;
+import com.gitblit.wicket.MarkupProcessor;
+import com.gitblit.wicket.MarkupProcessor.MarkupDocument;
+import com.gitblit.wicket.MarkupProcessor.MarkupSyntax;
 import com.gitblit.wicket.WicketUtils;
-import com.gitblit.wicket.charting.SecureChart;
+import com.gitblit.wicket.charting.Chart;
+import com.gitblit.wicket.charting.Charts;
+import com.gitblit.wicket.charting.Flotr2Charts;
 import com.gitblit.wicket.panels.BranchesPanel;
 import com.gitblit.wicket.panels.LinkPanel;
 import com.gitblit.wicket.panels.LogPanel;
 import com.gitblit.wicket.panels.RepositoryUrlPanel;
 import com.gitblit.wicket.panels.TagsPanel;
 
+@CacheControl(LastModified.REPOSITORY)
 public class SummaryPage extends RepositoryPage {
 
 	public SummaryPage(PageParameters params) {
 		super(params);
 
-		int numberCommits = GitBlit.getInteger(Keys.web.summaryCommitCount, 20);
+		int numberCommits = app().settings().getInteger(Keys.web.summaryCommitCount, 20);
 		if (numberCommits <= 0) {
 			numberCommits = 20;
 		}
-		int numberRefs = GitBlit.getInteger(Keys.web.summaryRefsCount, 5);
+		int numberRefs = app().settings().getInteger(Keys.web.summaryRefsCount, 5);
 
 		Repository r = getRepository();
 		final RepositoryModel model = getRepositoryModel();
@@ -79,8 +77,8 @@ public class SummaryPage extends RepositoryPage {
 
 		List<Metric> metrics = null;
 		Metric metricsTotal = null;
-		if (!model.skipSummaryMetrics && GitBlit.getBoolean(Keys.web.generateActivityGraph, true)) {
-			metrics = GitBlit.self().getRepositoryDefaultMetrics(model, r);
+		if (!model.skipSummaryMetrics && app().settings().getBoolean(Keys.web.generateActivityGraph, true)) {
+			metrics = app().repositories().getRepositoryDefaultMetrics(model, r);
 			metricsTotal = metrics.remove(0);
 		}
 
@@ -88,16 +86,17 @@ public class SummaryPage extends RepositoryPage {
 
 		// repository description
 		add(new Label("repositoryDescription", getRepositoryModel().description));
-		
+
 		// owner links
 		final List<String> owners = new ArrayList<String>(getRepositoryModel().owners);
 		ListDataProvider<String> ownersDp = new ListDataProvider<String>(owners);
 		DataView<String> ownersView = new DataView<String>("repositoryOwners", ownersDp) {
 			private static final long serialVersionUID = 1L;
 			int counter = 0;
+			@Override
 			public void populateItem(final Item<String> item) {
 				String ownername = item.getModelObject();
-				UserModel ownerModel = GitBlit.self().getUserModel(ownername);
+				UserModel ownerModel = app().users().getUserModel(ownername);
 				if (ownerModel != null) {
 					item.add(new LinkPanel("owner", null, ownerModel.getDisplayName(), UserPage.class,
 							WicketUtils.newUsernameParameter(ownerModel.username)).setRenderBodyOnly(true));
@@ -114,7 +113,7 @@ public class SummaryPage extends RepositoryPage {
 		};
 		ownersView.setRenderBodyOnly(true);
 		add(ownersView);
-		
+
 		add(WicketUtils.createTimestampLabel("repositoryLastChange",
 				JGitUtils.getLastChange(r).when, getTimeZone(), getTimeUtils()));
 		add(new Label("repositorySize", getRepositoryModel().size));
@@ -129,55 +128,40 @@ public class SummaryPage extends RepositoryPage {
 				WicketUtils.newRepositoryParameter(repositoryName)));
 
 		add(new RepositoryUrlPanel("repositoryUrlPanel", false, user, model));
-				
+
 		add(new LogPanel("commitsPanel", repositoryName, getRepositoryModel().HEAD, r, numberCommits, 0, getRepositoryModel().showRemoteBranches));
 		add(new TagsPanel("tagsPanel", repositoryName, r, numberRefs).hideIfEmpty());
 		add(new BranchesPanel("branchesPanel", getRepositoryModel(), r, numberRefs, false).hideIfEmpty());
 
-		if (getRepositoryModel().showReadme) {
-			String htmlText = null;
-			String markdownText = null;
-			String readme = null;
-			try {
-				RevCommit head = JGitUtils.getCommit(r, null);
-				List<String> markdownExtensions = GitBlit.getStrings(Keys.web.markdownExtensions);
-				List<PathModel> paths = JGitUtils.getFilesInPath(r, null, head);				
-				for (PathModel path : paths) {
-					if (!path.isTree()) {
-						String name = path.name.toLowerCase();
-
-						if (name.startsWith("readme")) {
-							if (name.indexOf('.') > -1) {
-								String ext = name.substring(name.lastIndexOf('.') + 1);
-								if (markdownExtensions.contains(ext)) {
-									readme = path.name;
-									break;
-								}
-							}
-						}
-					}
-				}
-				if (!StringUtils.isEmpty(readme)) {
-					String [] encodings = GitBlit.getEncodings();
-					markdownText = JGitUtils.getStringContent(r, head.getTree(), readme, encodings);
-					htmlText = MarkdownUtils.transformMarkdown(markdownText);
-				}
-			} catch (ParseException p) {
-				markdownText = MessageFormat.format("<div class=\"alert alert-error\"><strong>{0}:</strong> {1}</div>{2}", getString("gb.error"), getString("gb.markdownFailure"), markdownText);
-				htmlText = StringUtils.breakLinesForHtml(markdownText);
+		if (app().settings().getBoolean(Keys.web.summaryShowReadme, false)) {
+			// show a readme on the summary page
+			MarkupDocument markupDoc = null;
+			RevCommit head = JGitUtils.getCommit(r, null);
+			if (head != null) {
+				MarkupProcessor processor = new MarkupProcessor(app().settings());
+				markupDoc = processor.getReadme(r, repositoryName, getBestCommitId(head));
 			}
-			Fragment fragment = new Fragment("readme", "markdownPanel");
-			fragment.add(new Label("readmeFile", readme));
-			// Add the html to the page
-			Component content = new Label("readmeContent", htmlText).setEscapeModelStrings(false);
-			fragment.add(content.setVisible(!StringUtils.isEmpty(htmlText)));
-			add(fragment);
+			if (markupDoc == null || markupDoc.markup == null) {
+				add(new Label("readme").setVisible(false));
+			} else {
+				Fragment fragment = new Fragment("readme", MarkupSyntax.PLAIN.equals(markupDoc.syntax) ? "plaintextPanel" : "markdownPanel", this);
+				fragment.add(new Label("readmeFile", markupDoc.documentPath));
+				// Add the html to the page
+				Component content = new Label("readmeContent", markupDoc.html).setEscapeModelStrings(false);
+				fragment.add(content.setVisible(!StringUtils.isEmpty(markupDoc.html)));
+				add(fragment);
+			}
 		} else {
+			// global, no readme on summary page
 			add(new Label("readme").setVisible(false));
 		}
 
-		// Display an activity line graph
-		insertActivityGraph(metrics);
+		if (metrics == null || metrics.isEmpty()) {
+			add(new Label("commitsChart").setVisible(false));
+		} else {
+			Charts charts = createCharts(metrics);
+			add(new HeaderContributor(charts));
+		}
 	}
 
 	@Override
@@ -185,28 +169,38 @@ public class SummaryPage extends RepositoryPage {
 		return getString("gb.summary");
 	}
 
-	private void insertActivityGraph(List<Metric> metrics) {
-		if ((metrics != null) && (metrics.size() > 0)
-				&& GitBlit.getBoolean(Keys.web.generateActivityGraph, true)) {
-			IChartData data = WicketUtils.getChartData(metrics);
+	private Charts createCharts(List<Metric> metrics) {
 
-			ChartProvider provider = new ChartProvider(new Dimension(290, 100), ChartType.LINE,
-					data);
-			ChartAxis dateAxis = new ChartAxis(ChartAxisType.BOTTOM);
-			dateAxis.setLabels(new String[] { metrics.get(0).name,
-					metrics.get(metrics.size() / 2).name, metrics.get(metrics.size() - 1).name });
-			provider.addAxis(dateAxis);
+		Charts charts = new Flotr2Charts();
 
-			ChartAxis commitAxis = new ChartAxis(ChartAxisType.LEFT);
-			commitAxis.setLabels(new String[] { "",
-					String.valueOf((int) WicketUtils.maxValue(metrics)) });
-			provider.addAxis(commitAxis);
-			provider.setLineStyles(new LineStyle[] { new LineStyle(2, 4, 0), new LineStyle(0, 4, 1) });
-			provider.addShapeMarker(new ShapeMarker(MarkerType.CIRCLE, Color.decode("#002060"), 1, -1, 5));
-
-			add(new SecureChart("commitsChart", provider));
-		} else {
-			add(WicketUtils.newBlankImage("commitsChart"));
+		SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd");
+		String displayFormat = "MMM dd";
+		if(metrics.size() > 0 && metrics.get(0).name.length() == 7){
+			df = new SimpleDateFormat("yyyy-MM");
+			displayFormat = "yyyy MMM";
 		}
+		df.setTimeZone(getTimeZone());
+
+		// build google charts
+		Chart chart = charts.createLineChart("commitsChart", getString("gb.activity"), "day", getString("gb.commits"));
+		chart.setDateFormat(displayFormat);
+
+		for (Metric metric : metrics) {
+			Date date;
+			try {
+				date = df.parse(metric.name);
+			} catch (ParseException e) {
+				logger.error("Unable to parse date: " + metric.name);
+				return charts;
+			}
+			chart.addValue(date, (int)metric.count);
+			if(metric.tag > 0 ){
+				chart.addHighlight(date, (int)metric.count);
+			}
+		}
+		charts.addChart(chart);
+
+		return charts;
 	}
+
 }

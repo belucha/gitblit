@@ -18,11 +18,12 @@ package com.gitblit.models;
 import java.io.Serializable;
 
 import com.gitblit.Constants.AccessPermission;
+import com.gitblit.Constants.Transport;
 
 /**
  * Represents a git repository url and it's associated access permission for the
  * current user.
- *  
+ *
  * @author James Moger
  *
  */
@@ -30,14 +31,16 @@ public class RepositoryUrl implements Serializable {
 
 	private static final long serialVersionUID = 1L;
 
+	public final Transport transport;
 	public final String url;
 	public final AccessPermission permission;
 
 	public RepositoryUrl(String url, AccessPermission permission) {
+		this.transport = Transport.fromUrl(url);
 		this.url = url;
 		this.permission = permission;
 	}
-	
+
 	public boolean isExternal() {
 		return permission == null;
 	}

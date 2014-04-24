@@ -20,6 +20,7 @@ import java.text.DateFormat;
 import java.text.MessageFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
@@ -41,6 +42,7 @@ import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.PersonIdent;
+import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.RefRename;
 import org.eclipse.jgit.lib.RefUpdate;
 import org.eclipse.jgit.lib.RefUpdate.Result;
@@ -64,19 +66,19 @@ import com.gitblit.models.UserModel;
 /**
  * Utility class for maintaining a reflog within a git repository on an
  * orphan branch.
- * 
+ *
  * @author James Moger
  *
  */
 public class RefLogUtils {
-	
-	private static final String GB_REFLOG = "refs/gitblit/reflog";
+
+	private static final String GB_REFLOG = "refs/meta/gitblit/reflog";
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(RefLogUtils.class);
 
 	/**
 	 * Log an error message and exception.
-	 * 
+	 *
 	 * @param t
 	 * @param repository
 	 *            if repository is not null it MUST be the {0} parameter in the
@@ -98,44 +100,61 @@ public class RefLogUtils {
 	}
 
 	/**
+	 * Returns true if the repository has a reflog branch.
+	 *
+	 * @param repository
+	 * @return true if the repository has a reflog branch
+	 */
+	public static boolean hasRefLogBranch(Repository repository) {
+		try {
+			return repository.getRef(GB_REFLOG) != null;
+		} catch(Exception e) {
+			LOGGER.error("failed to determine hasRefLogBranch", e);
+		}
+		return false;
+	}
+
+	/**
 	 * Returns a RefModel for the reflog branch in the repository. If the
 	 * branch can not be found, null is returned.
-	 * 
+	 *
 	 * @param repository
 	 * @return a refmodel for the reflog branch or null
 	 */
 	public static RefModel getRefLogBranch(Repository repository) {
-		List<RefModel> refs = JGitUtils.getRefs(repository, com.gitblit.Constants.R_GITBLIT);
-		RefModel pushLog = null;
-		final String GB_PUSHES = "refs/gitblit/pushes";
+		List<RefModel> refs = JGitUtils.getRefs(repository, "refs/");
+		Ref oldRef = null;
 		for (RefModel ref : refs) {
 			if (ref.reference.getName().equals(GB_REFLOG)) {
 				return ref;
-			} else if (ref.reference.getName().equals(GB_PUSHES)) {
-				pushLog = ref;
+			} else if (ref.reference.getName().equals("refs/gitblit/reflog")) {
+				oldRef = ref.reference;
+			} else if (ref.reference.getName().equals("refs/gitblit/pushes")) {
+				oldRef = ref.reference;
 			}
 		}
-		if (pushLog != null) {
-			// rename refs/gitblit/pushes to refs/gitblit/reflog
+		if (oldRef != null) {
+			// rename old ref to refs/meta/gitblit/reflog
 			RefRename cmd;
 			try {
-				cmd = repository.renameRef(GB_PUSHES, GB_REFLOG);
+				cmd = repository.renameRef(oldRef.getName(), GB_REFLOG);
 				cmd.setRefLogIdent(new PersonIdent("Gitblit", "gitblit@localhost"));
-				cmd.setRefLogMessage("renamed " + GB_PUSHES + " => " + GB_REFLOG);
+				cmd.setRefLogMessage("renamed " + oldRef.getName() + " => " + GB_REFLOG);
 				Result res = cmd.rename();
 				switch (res) {
 				case RENAMED:
+					LOGGER.info(repository.getDirectory() + " " + cmd.getRefLogMessage());
 					return getRefLogBranch(repository);
 				default:
-					LOGGER.error("failed to rename " + GB_PUSHES + " => " + GB_REFLOG + " (" + res.name() + ")");
+					LOGGER.error("failed to rename " + oldRef.getName() + " => " + GB_REFLOG + " (" + res.name() + ")");
 				}
 			} catch (IOException e) {
-				LOGGER.error("failed to rename pushlog", e);
+				LOGGER.error("failed to rename reflog", e);
 			}
 		}
 		return null;
 	}
-	
+
 	private static UserModel newUserModelFrom(PersonIdent ident) {
 		String name = ident.getName();
 		String username;
@@ -148,16 +167,47 @@ public class RefLogUtils {
 			displayname = name;
 			username = ident.getEmailAddress();
 		}
-		
+
 		UserModel user = new UserModel(username);
 		user.displayName = displayname;
 		user.emailAddress = ident.getEmailAddress();
 		return user;
 	}
-	
+
+	/**
+	 * Logs a ref deletion.
+	 *
+	 * @param user
+	 * @param repository
+	 * @param ref
+	 * @return true, if the update was successful
+	 */
+	public static boolean deleteRef(UserModel user, Repository repository, Ref ref) {
+		try {
+			if (ref == null) {
+				return false;
+			}
+			RefModel reflogBranch = getRefLogBranch(repository);
+			if (reflogBranch == null) {
+				return false;
+			}
+
+			List<RevCommit> log = JGitUtils.getRevLog(repository, reflogBranch.getName(), ref.getName(), 0, 1);
+			if (log.isEmpty()) {
+				// this ref is not in the reflog branch
+				return false;
+			}
+			ReceiveCommand cmd = new ReceiveCommand(ref.getObjectId(), ObjectId.zeroId(), ref.getName());
+			return updateRefLog(user, repository, Arrays.asList(cmd));
+		} catch (Throwable t) {
+			error(t, repository, "Failed to commit reflog entry to {0}");
+		}
+		return false;
+	}
+
 	/**
 	 * Updates the reflog with the received commands.
-	 * 
+	 *
 	 * @param user
 	 * @param repository
 	 * @param commands
@@ -165,19 +215,35 @@ public class RefLogUtils {
 	 */
 	public static boolean updateRefLog(UserModel user, Repository repository,
 			Collection<ReceiveCommand> commands) {
+
+		// only track branches and tags
+		List<ReceiveCommand> filteredCommands = new ArrayList<ReceiveCommand>();
+		for (ReceiveCommand cmd : commands) {
+			if (!cmd.getRefName().startsWith(Constants.R_HEADS)
+					&& !cmd.getRefName().startsWith(Constants.R_TAGS)) {
+				continue;
+			}
+			filteredCommands.add(cmd);
+		}
+
+		if (filteredCommands.isEmpty()) {
+			// nothing to log
+			return true;
+		}
+
 		RefModel reflogBranch = getRefLogBranch(repository);
 		if (reflogBranch == null) {
 			JGitUtils.createOrphanBranch(repository, GB_REFLOG, null);
 		}
-		
+
 		boolean success = false;
 		String message = "push";
-		
+
 		try {
 			ObjectId headId = repository.resolve(GB_REFLOG + "^{commit}");
 			ObjectInserter odi = repository.newObjectInserter();
 			try {
-				// Create the in-memory index of the push log entry
+				// Create the in-memory index of the reflog log entry
 				DirCache index = createIndex(repository, headId, commands);
 				ObjectId indexTreeId = index.writeTree(odi);
 
@@ -238,17 +304,17 @@ public class RefLogUtils {
 		}
 		return success;
 	}
-	
+
 	/**
-	 * Creates an in-memory index of the push log entry.
-	 * 
+	 * Creates an in-memory index of the reflog entry.
+	 *
 	 * @param repo
 	 * @param headId
 	 * @param commands
 	 * @return an in-memory index
 	 * @throws IOException
 	 */
-	private static DirCache createIndex(Repository repo, ObjectId headId, 
+	private static DirCache createIndex(Repository repo, ObjectId headId,
 			Collection<ReceiveCommand> commands) throws IOException {
 
 		DirCache inCoreIndex = DirCache.newInCore();
@@ -287,7 +353,7 @@ public class RefLogUtils {
 					continue;
 				}
 				String content = change.toString();
-				
+
 				// create an index entry for this attachment
 				final DirCacheEntry dcEntry = new DirCacheEntry(path);
 				dcEntry.setLength(content.length());
@@ -338,7 +404,7 @@ public class RefLogUtils {
 		}
 		return inCoreIndex;
 	}
-	
+
 	public static List<RefLogEntry> getRefLog(String repositoryName, Repository repository) {
 		return getRefLog(repositoryName, repository, null, 0, -1);
 	}
@@ -354,18 +420,18 @@ public class RefLogUtils {
 	public static List<RefLogEntry> getRefLog(String repositoryName, Repository repository, Date minimumDate) {
 		return getRefLog(repositoryName, repository, minimumDate, 0, -1);
 	}
-	
+
 	/**
 	 * Returns the list of reflog entries as they were recorded by Gitblit.
 	 * Each RefLogEntry may represent multiple ref updates.
-	 * 
+	 *
 	 * @param repositoryName
 	 * @param repository
 	 * @param minimumDate
 	 * @param offset
 	 * @param maxCount
-	 * 			if < 0, all pushes are returned.
-	 * @return a list of push log entries
+	 * 			if < 0, all entries are returned.
+	 * @return a list of reflog entries
 	 */
 	public static List<RefLogEntry> getRefLog(String repositoryName, Repository repository,
 			Date minimumDate, int offset, int maxCount) {
@@ -377,7 +443,7 @@ public class RefLogUtils {
 		if (maxCount == 0) {
 			return list;
 		}
-		
+
 		Map<ObjectId, List<RefModel>> allRefs = JGitUtils.getAllRefs(repository);
 		List<RevCommit> pushes;
 		if (minimumDate == null) {
@@ -393,29 +459,47 @@ public class RefLogUtils {
 
 			UserModel user = newUserModelFrom(push.getAuthorIdent());
 			Date date = push.getAuthorIdent().getWhen();
-			
+
 			RefLogEntry log = new RefLogEntry(repositoryName, date, user);
+
+			// only report HEADS and TAGS for now
+			List<PathChangeModel> changedRefs = new ArrayList<PathChangeModel>();
+			for (PathChangeModel refChange : JGitUtils.getFilesInCommit(repository, push)) {
+				if (refChange.path.startsWith(Constants.R_HEADS)
+						|| refChange.path.startsWith(Constants.R_TAGS)) {
+					changedRefs.add(refChange);
+				}
+			}
+			if (changedRefs.isEmpty()) {
+				// skip empty commits
+				continue;
+			}
 			list.add(log);
-			List<PathChangeModel> changedRefs = JGitUtils.getFilesInCommit(repository, push);
 			for (PathChangeModel change : changedRefs) {
 				switch (change.changeType) {
 				case DELETE:
 					log.updateRef(change.path, ReceiveCommand.Type.DELETE);
 					break;
-				case ADD:
-					log.updateRef(change.path, ReceiveCommand.Type.CREATE);
 				default:
 					String content = JGitUtils.getStringContent(repository, push.getTree(), change.path);
 					String [] fields = content.split(" ");
 					String oldId = fields[1];
 					String newId = fields[2];
 					log.updateRef(change.path, ReceiveCommand.Type.valueOf(fields[0]), oldId, newId);
-					List<RevCommit> pushedCommits = JGitUtils.getRevLog(repository, oldId, newId);
-					for (RevCommit pushedCommit : pushedCommits) {
-						RepositoryCommit repoCommit = log.addCommit(change.path, pushedCommit);
-						if (repoCommit != null) {
-							repoCommit.setRefs(allRefs.get(pushedCommit.getId()));
+					if (ObjectId.zeroId().getName().equals(newId)) {
+						// ref deletion
+						continue;
+					}
+					try {
+						List<RevCommit> pushedCommits = JGitUtils.getRevLog(repository, oldId, newId);
+						for (RevCommit pushedCommit : pushedCommits) {
+							RepositoryCommit repoCommit = log.addCommit(change.path, pushedCommit);
+							if (repoCommit != null) {
+								repoCommit.setRefs(allRefs.get(pushedCommit.getId()));
+							}
 						}
+					} catch (Exception e) {
+
 					}
 				}
 			}
@@ -425,31 +509,31 @@ public class RefLogUtils {
 	}
 
 	/**
-	 * Returns the list of pushes separated by ref (e.g. each ref has it's own
-	 * PushLogEntry object).
-	 *  
+	 * Returns the list of entries organized by ref (e.g. each ref has it's own
+	 * RefLogEntry object).
+	 *
 	 * @param repositoryName
 	 * @param repository
 	 * @param maxCount
-	 * @return a list of push log entries separated by ref
+	 * @return a list of reflog entries separated by ref
 	 */
 	public static List<RefLogEntry> getLogByRef(String repositoryName, Repository repository, int maxCount) {
 		return getLogByRef(repositoryName, repository, 0, maxCount);
 	}
-	
+
 	/**
-	 * Returns the list of pushes separated by ref (e.g. each ref has it's own
-	 * PushLogEntry object).
-	 *  
+	 * Returns the list of entries organized by ref (e.g. each ref has it's own
+	 * RefLogEntry object).
+	 *
 	 * @param repositoryName
 	 * @param repository
 	 * @param offset
 	 * @param maxCount
-	 * @return a list of push log entries separated by ref
+	 * @return a list of reflog entries separated by ref
 	 */
 	public static List<RefLogEntry> getLogByRef(String repositoryName, Repository repository,  int offset,
 			int maxCount) {
-		// break the push log into ref push logs and then merge them back into a list
+		// break the reflog into ref entries and then merge them back into a list
 		Map<String, List<RefLogEntry>> refMap = new HashMap<String, List<RefLogEntry>>();
         List<RefLogEntry> refLog = getRefLog(repositoryName, repository, offset, maxCount);
 		for (RefLogEntry entry : refLog) {
@@ -457,14 +541,14 @@ public class RefLogUtils {
 				if (!refMap.containsKey(ref)) {
 					refMap.put(ref, new ArrayList<RefLogEntry>());
 				}
-				
+
 				// construct new ref-specific ref change entry
 				RefLogEntry refChange;
 				if (entry instanceof DailyLogEntry) {
-					// simulated push log from commits grouped by date
+					// simulated reflog from commits grouped by date
 					refChange = new DailyLogEntry(entry.repository, entry.date);
 				} else {
-					// real push log entry
+					// real reflog entry
 					refChange = new RefLogEntry(entry.repository, entry.date, entry.user);
 				}
 				refChange.updateRef(ref, entry.getChangeType(ref), entry.getOldId(ref), entry.getNewId(ref));
@@ -472,56 +556,55 @@ public class RefLogUtils {
 				refMap.get(ref).add(refChange);
 			}
 		}
-		
+
 		// merge individual ref changes into master list
 		List<RefLogEntry> mergedRefLog = new ArrayList<RefLogEntry>();
 		for (List<RefLogEntry> refPush : refMap.values()) {
 			mergedRefLog.addAll(refPush);
 		}
-		
+
 		// sort ref log
 		Collections.sort(mergedRefLog);
-		
+
 		return mergedRefLog;
 	}
-	
+
 	/**
 	 * Returns the list of ref changes separated by ref (e.g. each ref has it's own
 	 * RefLogEntry object).
-	 *  
+	 *
 	 * @param repositoryName
 	 * @param repository
 	 * @param minimumDate
 	 * @return a list of ref log entries separated by ref
 	 */
 	public static List<RefLogEntry> getLogByRef(String repositoryName, Repository repository,  Date minimumDate) {
-		// break the push log into ref push logs and then merge them back into a list
+		// break the reflog into refs and then merge them back into a list
 		Map<String, List<RefLogEntry>> refMap = new HashMap<String, List<RefLogEntry>>();
-		List<RefLogEntry> pushes = getRefLog(repositoryName, repository, minimumDate);
-		for (RefLogEntry push : pushes) {
-			for (String ref : push.getChangedRefs()) {
+		List<RefLogEntry> entries = getRefLog(repositoryName, repository, minimumDate);
+		for (RefLogEntry entry : entries) {
+			for (String ref : entry.getChangedRefs()) {
 				if (!refMap.containsKey(ref)) {
 					refMap.put(ref, new ArrayList<RefLogEntry>());
 				}
 
-                // construct new ref-specific push log entry
-                RefLogEntry refPush = new RefLogEntry(push.repository, push.date, push.user);
-                refPush.updateRef(ref, push.getChangeType(ref), push.getOldId(ref), push.getNewId(ref));
-				refPush.addCommits(push.getCommits(ref));
+                // construct new ref-specific log entry
+                RefLogEntry refPush = new RefLogEntry(entry.repository, entry.date, entry.user);
+                refPush.updateRef(ref, entry.getChangeType(ref), entry.getOldId(ref), entry.getNewId(ref));
+				refPush.addCommits(entry.getCommits(ref));
 				refMap.get(ref).add(refPush);
 			}
 		}
-		
-		// merge individual ref pushes into master list
-		List<RefLogEntry> refPushLog = new ArrayList<RefLogEntry>();
-		for (List<RefLogEntry> refPush : refMap.values()) {
-			refPushLog.addAll(refPush);
+
+		// merge individual ref entries into master list
+		List<RefLogEntry> refLog = new ArrayList<RefLogEntry>();
+		for (List<RefLogEntry> entry : refMap.values()) {
+			refLog.addAll(entry);
 		}
-		
-		// sort ref push log
-		Collections.sort(refPushLog);
-		
-		return refPushLog;
+
+		Collections.sort(refLog);
+
+		return refLog;
 	}
 
     /**
@@ -532,7 +615,7 @@ public class RefLogUtils {
      * @param minimumDate
      * @param offset
      * @param maxCount
-     * 			if < 0, all pushes are returned.
+     * 			if < 0, all entries are returned.
      * @param the timezone to use when aggregating commits by date
      * @return a list of grouped commit log entries
      */
@@ -575,18 +658,18 @@ public class RefLogUtils {
                 	linearParent = commit.getParents()[0].getId().getName();
                 	digest.updateRef(branch, ReceiveCommand.Type.UPDATE, linearParent, commit.getName());
                 }
-                
+
                 RepositoryCommit repoCommit = digest.addCommit(commit);
                 if (repoCommit != null) {
                 	List<RefModel> matchedRefs = allRefs.get(commit.getId());
                     repoCommit.setRefs(matchedRefs);
-                    
+
                     if (!ArrayUtils.isEmpty(matchedRefs)) {
                         for (RefModel ref : matchedRefs) {
                             if (ref.getName().startsWith(Constants.R_TAGS)) {
                                 // treat tags as special events in the log
                                 if (!tags.containsKey(dateStr)) {
-                        			UserModel tagUser = newUserModelFrom(commit.getAuthorIdent());
+                        			UserModel tagUser = newUserModelFrom(ref.getAuthorIdent());
                         			Date tagDate = commit.getAuthorIdent().getWhen();
                         			tags.put(dateStr, new DailyLogEntry(repositoryName, tagDate, tagUser));
                                 }
@@ -597,7 +680,7 @@ public class RefLogUtils {
                             } else if (ref.getName().startsWith(Constants.R_PULL)) {
                                 // treat pull requests as special events in the log
                                 if (!pulls.containsKey(dateStr)) {
-                        			UserModel commitUser = newUserModelFrom(commit.getAuthorIdent());
+                        			UserModel commitUser = newUserModelFrom(ref.getAuthorIdent());
                         			Date commitDate = commit.getAuthorIdent().getWhen();
                         			pulls.put(dateStr, new DailyLogEntry(repositoryName, commitDate, commitUser));
                                 }
@@ -621,7 +704,7 @@ public class RefLogUtils {
 
     /**
      * Returns the list of commits separated by ref (e.g. each ref has it's own
-     * PushLogEntry object for each day).
+     * RefLogEntry object for each day).
      *
      * @param repositoryName
      * @param repository
@@ -631,36 +714,35 @@ public class RefLogUtils {
      */
     public static List<DailyLogEntry> getDailyLogByRef(String repositoryName, Repository repository,
     		Date minimumDate, TimeZone timezone) {
-        // break the push log into ref push logs and then merge them back into a list
+        // break the reflog into ref entries and then merge them back into a list
         Map<String, List<DailyLogEntry>> refMap = new HashMap<String, List<DailyLogEntry>>();
-        List<DailyLogEntry> pushes = getDailyLog(repositoryName, repository, minimumDate, 0, -1, timezone);
-        for (DailyLogEntry push : pushes) {
-            for (String ref : push.getChangedRefs()) {
+        List<DailyLogEntry> entries = getDailyLog(repositoryName, repository, minimumDate, 0, -1, timezone);
+        for (DailyLogEntry entry : entries) {
+            for (String ref : entry.getChangedRefs()) {
                 if (!refMap.containsKey(ref)) {
                     refMap.put(ref, new ArrayList<DailyLogEntry>());
                 }
 
-                // construct new ref-specific push log entry
-                DailyLogEntry refPush = new DailyLogEntry(push.repository, push.date, push.user);
-                refPush.updateRef(ref, push.getChangeType(ref), push.getOldId(ref), push.getNewId(ref));
-                refPush.addCommits(push.getCommits(ref));
-                refMap.get(ref).add(refPush);
+                // construct new ref-specific log entry
+                DailyLogEntry refEntry = new DailyLogEntry(entry.repository, entry.date, entry.user);
+                refEntry.updateRef(ref, entry.getChangeType(ref), entry.getOldId(ref), entry.getNewId(ref));
+                refEntry.addCommits(entry.getCommits(ref));
+                refMap.get(ref).add(refEntry);
             }
         }
 
-        // merge individual ref pushes into master list
-        List<DailyLogEntry> refPushLog = new ArrayList<DailyLogEntry>();
-        for (List<DailyLogEntry> refPush : refMap.values()) {
-        	for (DailyLogEntry entry : refPush) {
+        // merge individual ref entries into master list
+        List<DailyLogEntry> refLog = new ArrayList<DailyLogEntry>();
+        for (List<DailyLogEntry> refEntry : refMap.values()) {
+        	for (DailyLogEntry entry : refEntry) {
         		if (entry.getCommitCount() > 0) {
-        			refPushLog.add(entry);
+        			refLog.add(entry);
         		}
         	}
         }
 
-        // sort ref push log
-        Collections.sort(refPushLog);
+        Collections.sort(refLog);
 
-        return refPushLog;
+        return refLog;
     }
 }

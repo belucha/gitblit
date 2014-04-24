@@ -27,31 +27,34 @@ import java.util.Set;
 import org.apache.wicket.PageParameters;
 import org.apache.wicket.behavior.HeaderContributor;
 import org.apache.wicket.markup.html.basic.Label;
+import org.apache.wicket.markup.html.panel.Fragment;
 
-import com.gitblit.GitBlit;
 import com.gitblit.Keys;
 import com.gitblit.models.Activity;
 import com.gitblit.models.Metric;
 import com.gitblit.models.RepositoryModel;
 import com.gitblit.utils.ActivityUtils;
 import com.gitblit.utils.StringUtils;
+import com.gitblit.wicket.CacheControl;
+import com.gitblit.wicket.CacheControl.LastModified;
 import com.gitblit.wicket.PageRegistration;
 import com.gitblit.wicket.PageRegistration.DropDownMenuItem;
 import com.gitblit.wicket.PageRegistration.DropDownMenuRegistration;
 import com.gitblit.wicket.WicketUtils;
-import com.gitblit.wicket.charting.GoogleChart;
-import com.gitblit.wicket.charting.GoogleCharts;
-import com.gitblit.wicket.charting.GoogleLineChart;
-import com.gitblit.wicket.charting.GooglePieChart;
+import com.gitblit.wicket.charting.Chart;
+import com.gitblit.wicket.charting.Charts;
+import com.gitblit.wicket.charting.Flotr2Charts;
 import com.gitblit.wicket.panels.ActivityPanel;
 
 /**
  * Activity Page shows a list of recent commits across all visible Gitblit
  * repositories.
- * 
+ *
  * @author James Moger
- * 
+ *
  */
+
+@CacheControl(LastModified.ACTIVITY)
 public class ActivityPage extends RootPage {
 
 	public ActivityPage(PageParameters params) {
@@ -61,14 +64,19 @@ public class ActivityPage extends RootPage {
 		// parameters
 		int daysBack = WicketUtils.getDaysBack(params);
 		if (daysBack < 1) {
-			daysBack = GitBlit.getInteger(Keys.web.activityDuration, 7);
+			daysBack = app().settings().getInteger(Keys.web.activityDuration, 7);
 		}
 		String objectId = WicketUtils.getObject(params);
 
 		// determine repositories to view and retrieve the activity
 		List<RepositoryModel> models = getRepositories(params);
-		List<Activity> recentActivity = ActivityUtils.getRecentActivity(models, 
-				daysBack, objectId, getTimeZone());
+		List<Activity> recentActivity = ActivityUtils.getRecentActivity(
+				app().settings(),
+				app().repositories(),
+				models,
+				daysBack,
+				objectId,
+				getTimeZone());
 
 		String headerPattern;
 		if (daysBack == 1) {
@@ -86,11 +94,12 @@ public class ActivityPage extends RootPage {
 				headerPattern = getString("gb.recentActivityStats");
 			}
 		}
-		
+
 		if (recentActivity.size() == 0) {
 			// no activity, skip graphs and activity panel
 			add(new Label("subheader", MessageFormat.format(headerPattern,
 					daysBack)));
+			add(new Label("chartsPanel").setVisible(false));
 			add(new Label("activityPanel"));
 		} else {
 			// calculate total commits and total authors
@@ -107,8 +116,13 @@ public class ActivityPage extends RootPage {
 					daysBack, totalCommits, totalAuthors)));
 
 			// create the activity charts
-			GoogleCharts charts = createCharts(recentActivity);
-			add(new HeaderContributor(charts));
+			if (app().settings().getBoolean(Keys.web.generateActivityGraph, true)) {
+				Charts charts = createCharts(recentActivity);
+				add(new HeaderContributor(charts));
+				add(new Fragment("chartsPanel", "chartsFragment", this));
+			} else {
+				add(new Label("chartsPanel").setVisible(false));
+			}
 
 			// add activity panel
 			add(new ActivityPanel("activityPanel", recentActivity));
@@ -126,7 +140,7 @@ public class ActivityPage extends RootPage {
 				ActivityPage.class);
 
 		PageParameters currentParameters = getPageParameters();
-		int daysBack = GitBlit.getInteger(Keys.web.activityDuration, 7);
+		int daysBack = app().settings().getInteger(Keys.web.activityDuration, 7);
 		if (currentParameters != null && !currentParameters.containsKey("db")) {
 			currentParameters.put("db", daysBack);
 		}
@@ -147,11 +161,11 @@ public class ActivityPage extends RootPage {
 	/**
 	 * Creates the daily activity line chart, the active repositories pie chart,
 	 * and the active authors pie chart
-	 * 
+	 *
 	 * @param recentActivity
 	 * @return
 	 */
-	private GoogleCharts createCharts(List<Activity> recentActivity) {
+	private Charts createCharts(List<Activity> recentActivity) {
 		// activity metrics
 		Map<String, Metric> repositoryMetrics = new HashMap<String, Metric>();
 		Map<String, Metric> authorMetrics = new HashMap<String, Metric>();
@@ -178,34 +192,36 @@ public class ActivityPage extends RootPage {
 			}
 		}
 
-		// build google charts
-		GoogleCharts charts = new GoogleCharts();
+		// build charts
+		Charts charts = new Flotr2Charts();
 
 		// sort in reverse-chronological order and then reverse that
 		Collections.sort(recentActivity);
 		Collections.reverse(recentActivity);
 
 		// daily line chart
-		GoogleChart chart = new GoogleLineChart("chartDaily", getString("gb.dailyActivity"), "day",
+		Chart chart = charts.createLineChart("chartDaily", getString("gb.dailyActivity"), "day",
 				getString("gb.commits"));
 		SimpleDateFormat df = new SimpleDateFormat("MMM dd");
 		df.setTimeZone(getTimeZone());
 		for (Activity metric : recentActivity) {
-			chart.addValue(df.format(metric.startDate), metric.getCommitCount());
+			chart.addValue(metric.startDate, metric.getCommitCount());
 		}
 		charts.addChart(chart);
 
-		// active repositories pie chart
-		chart = new GooglePieChart("chartRepositories", getString("gb.activeRepositories"),
+		// active repositories pie chart 
+		chart = charts.createPieChart("chartRepositories", getString("gb.activeRepositories"),
 				getString("gb.repository"), getString("gb.commits"));
 		for (Metric metric : repositoryMetrics.values()) {
 			chart.addValue(metric.name, metric.count);
 		}
 		chart.setShowLegend(false);
+		String url = urlFor(SummaryPage.class, null).toString() + "?r=";
+		chart.setClickUrl(url);
 		charts.addChart(chart);
 
 		// active authors pie chart
-		chart = new GooglePieChart("chartAuthors", getString("gb.activeAuthors"),
+		chart = charts.createPieChart("chartAuthors", getString("gb.activeAuthors"),
 				getString("gb.author"), getString("gb.commits"));
 		for (Metric metric : authorMetrics.values()) {
 			chart.addValue(metric.name, metric.count);

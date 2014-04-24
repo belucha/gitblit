@@ -66,6 +66,7 @@ public class TagsPanel extends BasePanel {
 			private static final long serialVersionUID = 1L;
 			int counter;
 
+			@Override
 			public void populateItem(final Item<RefModel> item) {
 				RefModel entry = item.getModelObject();
 
@@ -89,15 +90,19 @@ public class TagsPanel extends BasePanel {
 								.getReferencedObjectId().getName())));
 
 				// workaround for RevTag returning a lengthy shortlog. :(
-				String message = StringUtils.trimString(entry.getShortMessage(), 
+				String message = StringUtils.trimString(entry.getShortMessage(),
 						com.gitblit.Constants.LEN_SHORTLOG);
 
 				if (linkClass.equals(BlobPage.class)) {
 					// Blob Tag Object
 					item.add(WicketUtils.newImage("tagIcon", "file_16x16.png"));
-					item.add(new LinkPanel("tagDescription", "list", message, TagPage.class,
+					LinkPanel messageLink = new LinkPanel("tagDescription", "list", message, TagPage.class,
 							WicketUtils.newObjectParameter(repositoryName, entry.getObjectId()
-									.getName())));
+									.getName()));
+					if (!entry.getShortMessage().equals(message)) {
+						messageLink.setTooltip(entry.getShortMessage());
+					}
+					item.add(messageLink);
 
 					Fragment fragment = new Fragment("tagLinks", "blobLinks", this);
 					fragment.add(new BookmarkablePageLink<Void>("tag", TagPage.class, WicketUtils
@@ -117,9 +122,13 @@ public class TagsPanel extends BasePanel {
 					// Standard Tag Object
 					if (entry.isAnnotatedTag()) {
 						item.add(WicketUtils.newImage("tagIcon", "tag_16x16.png"));
-						item.add(new LinkPanel("tagDescription", "list", message, TagPage.class,
+						LinkPanel messageLink = new LinkPanel("tagDescription", "list", message, TagPage.class,
 								WicketUtils.newObjectParameter(repositoryName, entry.getObjectId()
-										.getName())));
+										.getName()));
+						if (!message.equals(entry.getShortMessage())) {
+							messageLink.setTooltip(entry.getShortMessage());
+						}
+						item.add(messageLink);
 
 						Fragment fragment = new Fragment("tagLinks", "annotatedLinks", this);
 						fragment.add(new BookmarkablePageLink<Void>("tag", TagPage.class,

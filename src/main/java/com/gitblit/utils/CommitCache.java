@@ -35,36 +35,36 @@ import com.gitblit.models.RepositoryCommit;
 
 /**
  * Caches repository commits for re-use in the dashboard and activity pages.
- * 
+ *
  * @author James Moger
  *
  */
 public class CommitCache {
-	
+
 	private static final CommitCache instance;
-	
+
 	protected final Logger logger = LoggerFactory.getLogger(getClass());
-	
+
 	protected final Map<String, ObjectCache<List<RepositoryCommit>>> cache;
-	
+
 	protected int cacheDays = -1;
-	
+
 	public static CommitCache instance() {
 		return instance;
 	}
-	
+
 	static {
 		instance = new CommitCache();
 	}
-	
+
 	protected CommitCache() {
 		cache = new ConcurrentHashMap<String, ObjectCache<List<RepositoryCommit>>>();
 	}
-	
+
 	/**
 	 * Returns the cutoff date for the cache.  Commits after this date are cached.
 	 * Commits before this date are not cached.
-	 * 
+	 *
 	 * @return
 	 */
 	public Date getCutoffDate() {
@@ -77,28 +77,28 @@ public class CommitCache {
 		cal.add(Calendar.DATE, -1*cacheDays);
 		return cal.getTime();
 	}
-	
+
 	/**
 	 * Sets the number of days to cache.
-	 * 
+	 *
 	 * @param days
 	 */
 	public synchronized void setCacheDays(int days) {
 		this.cacheDays = days;
 		clear();
 	}
-	
+
 	/**
 	 * Clears the entire commit cache.
-	 * 
+	 *
 	 */
 	public void clear() {
 		cache.clear();
 	}
-	
+
 	/**
 	 * Clears the commit cache for a specific repository.
-	 * 
+	 *
 	 * @param repositoryName
 	 */
 	public void clear(String repositoryName) {
@@ -108,10 +108,27 @@ public class CommitCache {
 			logger.info(MessageFormat.format("{0} commit cache cleared", repositoryName));
 		}
 	}
-	
+
+	/**
+	 * Clears the commit cache for a specific branch of a specific repository.
+	 *
+	 * @param repositoryName
+	 * @param branch
+	 */
+	public void clear(String repositoryName, String branch) {
+		String repoKey = repositoryName.toLowerCase();
+		ObjectCache<List<RepositoryCommit>> repoCache = cache.get(repoKey);
+		if (repoCache != null) {
+			List<RepositoryCommit> commits = repoCache.remove(branch.toLowerCase());
+			if (!ArrayUtils.isEmpty(commits)) {
+				logger.info(MessageFormat.format("{0}:{1} commit cache cleared", repositoryName, branch));
+			}
+		}
+	}
+
 	/**
 	 * Get all commits for the specified repository:branch that are in the cache.
-	 * 
+	 *
 	 * @param repositoryName
 	 * @param repository
 	 * @param branch
@@ -120,12 +137,12 @@ public class CommitCache {
 	public List<RepositoryCommit> getCommits(String repositoryName, Repository repository, String branch) {
 		return getCommits(repositoryName, repository, branch, getCutoffDate());
 	}
-	
+
 	/**
 	 * Get all commits for the specified repository:branch since a specific date.
 	 * These commits may be retrieved from the cache if the sinceDate is after
 	 * the cacheCutoffDate.
-	 * 
+	 *
 	 * @param repositoryName
 	 * @param repository
 	 * @param branch
@@ -142,13 +159,13 @@ public class CommitCache {
 			if (!cache.containsKey(repoKey)) {
 				cache.put(repoKey, new ObjectCache<List<RepositoryCommit>>());
 			}
-			
+
 			ObjectCache<List<RepositoryCommit>> repoCache = cache.get(repoKey);
 			String branchKey = branch.toLowerCase();
-			
+
 			RevCommit tip = JGitUtils.getCommit(repository, branch);
 			Date tipDate = JGitUtils.getCommitDate(tip);
-			
+
 			List<RepositoryCommit> commits;
 			if (!repoCache.hasCurrent(branchKey, tipDate)) {
 				commits = repoCache.getObject(branchKey);
@@ -176,7 +193,7 @@ public class CommitCache {
 				// update cache
 				repoCache.updateObject(branchKey, tipDate, commits);
 			}
-			
+
 			if (sinceDate.equals(cacheCutoffDate)) {
 				list = commits;
 			} else {
@@ -193,10 +210,10 @@ public class CommitCache {
 		}
 		return list;
 	}
-	
+
 	/**
-	 * Returns a list of commits for the specified repository branch. 
-	 * 
+	 * Returns a list of commits for the specified repository branch.
+	 *
 	 * @param repositoryName
 	 * @param repository
 	 * @param branch
@@ -208,15 +225,16 @@ public class CommitCache {
 		List<RepositoryCommit> commits = new ArrayList<RepositoryCommit>();
 		for (RevCommit commit : JGitUtils.getRevLog(repository, branch, sinceDate)) {
 			RepositoryCommit commitModel = new RepositoryCommit(repositoryName, branch, commit);
-			commitModel.setRefs(allRefs.get(commitModel.getName()));
+			List<RefModel> commitRefs = allRefs.get(commitModel.getId());
+			commitModel.setRefs(commitRefs);
 			commits.add(commitModel);
 		}
 		return commits;
 	}
-	
+
 	/**
-	 * Returns a list of commits for the specified repository branch since the specified commit. 
-	 * 
+	 * Returns a list of commits for the specified repository branch since the specified commit.
+	 *
 	 * @param repositoryName
 	 * @param repository
 	 * @param branch
@@ -228,15 +246,16 @@ public class CommitCache {
 		List<RepositoryCommit> commits = new ArrayList<RepositoryCommit>();
 		for (RevCommit commit : JGitUtils.getRevLog(repository, sinceCommit.getName(), branch)) {
 			RepositoryCommit commitModel = new RepositoryCommit(repositoryName, branch, commit);
-			commitModel.setRefs(allRefs.get(commitModel.getName()));
+			List<RefModel> commitRefs = allRefs.get(commitModel.getId());
+			commitModel.setRefs(commitRefs);
 			commits.add(commitModel);
 		}
 		return commits;
 	}
-	
+
 	/**
 	 * Reduces the list of commits to those since the specified date.
-	 * 
+	 *
 	 * @param commits
 	 * @param sinceDate
 	 * @return  a list of commits

@@ -107,10 +107,15 @@ public class LinkPanel extends Panel {
 		link.add(new Label("label", labelModel));
 		add(link);
 	}
-	
+
 	public void setNoFollow() {
 		Component c = get("link");
 		c.add(new SimpleAttributeModifier("rel", "nofollow"));
+	}
+
+	public void setTooltip(String tooltip) {
+		Component c = get("link");
+		c.add(new SimpleAttributeModifier("title", tooltip));
 	}
 
 }
